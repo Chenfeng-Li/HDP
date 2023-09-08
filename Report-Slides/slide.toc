@@ -1,7 +1,0 @@
-\beamer@sectionintoc {1}{Literature Review}{3}{0}{1}
-\beamer@subsectionintoc {1}{1}{\small {Slice Sampler for Mixture Models (Walker, 2007; Kalli et al., 2011)}}{4}{0}{1}
-\beamer@subsectionintoc {1}{2}{\small {HDP Model (Teh et al., 2004)}}{16}{0}{1}
-\beamer@sectionintoc {2}{Repeat and Research}{30}{0}{2}
-\beamer@subsectionintoc {2}{1}{\small {Repeat: Chinese Restaurant Franchise Sampling Method}}{31}{0}{2}
-\beamer@subsectionintoc {2}{2}{\small {HDP Model with Latent Indicator Variables}}{45}{0}{2}
-\beamer@subsectionintoc {2}{3}{\small {Slice Sampling for HDP}}{49}{0}{2}
