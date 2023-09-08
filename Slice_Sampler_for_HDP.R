@@ -1,0 +1,296 @@
+###* Slice Sampler for HDP *###
+slice_sampler_HDP <- function(y, beta0=1, alpha0=1, iter_max=500, Kcap=20, Tcap=20, extension_factor=1.5){
+  # input of the function:
+  ## y: observations, a list of matrices, each matrix is a group
+  ## beta0: the parameter of global DP, beta~GEM(beta0)
+  ## alpha0: the parameter of group level DP, gamma~GEM(alpha0)
+  ## iter_max: maximum iterations
+  ## Kcap: initial length to store k, might be updated if the length isn't enough
+  ## Tcap: initial length to store t, might be updated if the length isn't enough
+  ## extension_factor: if the length is not enough, extend the length of k/t to
+  ## be length * extension_factor
+  
+  calculate_prod <- function(prod_list){
+    # this is a function to calculate product with normalization 
+    log_sums <- sapply(prod_list,function(x) sum(log(x))) 
+    sapply(log_sums, function(x) exp(x-max(log_sums)))
+  }
+  
+  find_turning_pos <- function(beta, threshold){
+    # if the saved length is not enough, we return the position 
+    # this is used to calculate the position we need to get to 
+    tmp <- which(c(cumsum(beta),1) > 1-threshold)[1]
+    tmp
+  }
+  
+  sample_from_pmf <- function(n, pmf){
+    # this function is used to sample from a given pmf 
+    sample(x = seq(1,length(pmf)), n, replace = T, prob=pmf)
+  }
+  
+  stick_break_func <- function(x){
+    # this is used to calculate the stick breaking expression 
+    temp <- c(1,cumprod(1-x))
+    temp[1:length(x)] * x
+  }
+  
+  count_beta <- function(z, K){
+    # output[1, j]: how many labels == j are in z
+    # output[2, j]: how many labels > j are in z 
+    zcounts <- tabulate(z, K)
+    rbind(zcounts, c(rev(cumsum(rev(zcounts)))[-1], 0))
+  }
+  
+  update_phi <- function(y, z, K, prec2_y = 1, prec2_phi = 1){ 
+    # this is a function to update phi
+    z_flat <- unlist(z)
+    y_flat <- do.call(rbind,y)
+    z_freq <- tabulate(z_flat,K)
+    yz_df <- data.frame(y_flat, z=z_flat)
+    temp <- which(z_freq == 0)
+    yz_df <- rbind(data.frame(x1=0, z=temp), yz_df)
+    phi_mean <- aggregate(.~z, yz_df,
+                          function(x) sum(x)*(prec2_y/(prec2_phi+length(x)*prec2_y)))
+    phi_mean <- as.matrix(phi_mean[, -1])
+    prec2_post <- prec2_phi + z_freq*prec2_y
+    phi_new <- do.call(rbind, lapply(1:K, function(k) rnorm(1, mean = phi_mean[k,],
+                                                            sd = 1/sqrt(prec2_post[k]))))
+    list(phi=phi_new, prec2=prec2_post)
+  }
+  
+  Ker <- function(y, phi, prec2_y=1){
+    # kernel function, we use a Normal kernel, N(phi, 1/prec2_y) 
+    dnorm(y, mean=phi, sd=1/sqrt(prec2_y))
+  }
+  
+  # number of groups: J
+  J <- length(y)
+  # how many observations in each group, n
+  n <- sapply(y, function(x) dim(x)[1])
+  # the vector which stores the maximum length of t of group j 
+  Tjcap <- rep(Tcap,J)
+  
+  # t, k, z, u, v
+  tb <- lapply(1:J, function(j) rep(1,n[j]))
+  kb <- lapply(1:J, function(j) rep(1,Tjcap[j])) 
+  z <- lapply(n, function(nj) rep(1,nj))
+  u <- lapply(1:J, function(j) runif(n[j]))
+  v <- lapply(1:J, function(j) runif(Tjcap[j]))
+  
+  # store the old k, t, u, v, z
+  kb_old <- kb
+  tb_old <- tb
+  u_old <- u
+  v_old <- v
+  z_old <- z
+  
+  # lists used to store all sampled z, t, k
+  z_hist <- list()
+  t_hist <- list()
+  k_hist <- list()
+  T_hist <- list()
+  K_hist <- list()
+  
+  # indicator of iteration
+  itr <- 1
+  while (itr < iter_max){ 
+    gamp <- list()
+    gam <- list()
+    T_all <- list()
+    Tv <- rep(0,J)
+    Tj_overflow <- F
+    for (j in 1:J){
+      # 1. update gamma
+      g_counts <- count_beta( tb[[j]], Tjcap[j] )
+      gamp[[j]] <- rbeta( Tjcap[j], 1 + g_counts[1,], alpha0 + g_counts[2,] )
+      gam[[j]] <- stick_break_func(gamp[[j]])
+      T_all[[j]] <- sapply( 1:n[j], function(i) find_turning_pos(gam[[j]], u[[j]][i])) 
+      Tv[j] <- max(T_all[[j]])
+      
+      if ( Tv[j] > Tjcap[j] ){
+        Tj_overflow <- T
+        Tjcap_old <- Tjcap[j]
+        Tjcap[j] <- round( extension_factor*Tjcap[j] ) 
+        v_old[[j]] <- c( v_old[[j]], runif(Tjcap[j]-Tjcap_old)) 
+        break
+      }
+    }
+    if (Tj_overflow){ 
+      kb <- kb_old
+      tb <- tb_old
+      u <- u_old
+      v <- v_old 
+      z <- z_old 
+      next
+    }
+    
+    
+    k_counts <- count_beta( unlist(kb), Kcap)
+    betap <- rbeta(Kcap, 1 + k_counts[1,], beta0 + k_counts[2,])
+    beta <- stick_break_func( betap )
+    K_all <- list()
+    Kv <- rep(0,J)
+    for (j in 1:J){
+      K_all[[j]] <- sapply( 1:Tjcap[j], function(t) find_turning_pos(beta, v[[j]][t]))
+      Kv[j] <- max( K_all[[j]] )
+    }
+    K <- max(Kv) 
+    if(K>Kcap){
+      Kcap <- round(extension_factor*Kcap)
+      kb <- kb_old
+      tb <- tb_old
+      u <- u_old
+      v <- v_old 
+      z <- z_old 
+      next
+    }
+    
+    # restore the current state as the old one
+    kb_old <- kb
+    tb_old <- tb
+    u_old <- u
+    v_old <- v
+    z_old <- z
+    
+    phi_vec <- update_phi(y, z, Kcap)$phi
+    f_vec <- sapply(1:Kcap, function(k) { function(y) Ker(y, phi_vec[k,]) } )
+    for (j in 1:J) {
+      # 2. update k
+      for (t in 1:Tjcap[j]) {
+        prod_list <- lapply( 1:K_all[[j]][t],
+                             function(k) f_vec[[k]]( y[[j]][tb[[j]] == t, ])) 
+        prob_vec <- calculate_prod(prod_list)
+        kb[[j]][t] <- sample_from_pmf( 1, prob_vec)
+      }
+      
+      # 3. update t
+      for (i in 1:n[j]){
+        prob_vec <- sapply(1:T_all[[j]][i],
+                           function(t) f_vec[[ kb[[j]][t] ]](y[[j]][i,])) 
+        tb[[j]][i] <- sample_from_pmf( 1, prob_vec)
+      }
+      
+      # 4. update u
+      u_upper <- sapply(seq(1,n[j]), function(i) gam[[j]][ tb[[j]][i] ]) 
+      u[[j]] <- runif(n[j], 0, u_upper)
+      
+      # 5. update v
+      v_upper <- sapply(seq(1,Tjcap[j]), function(t) beta[ kb[[j]][t] ]) 
+      v[[j]] <- runif(Tjcap[j], 0, v_upper)
+      
+      # 6. update z
+      z[[j]] <- sapply(1:n[j], function(i) kb[[j]][ tb[[j]][i] ] ) 
+    }
+    
+    itr <- itr + 1
+    if (itr %% 300 == 0) {
+      cat(sprintf("%6d: ",itr),'Finish\n')
+    }
+    
+    z_hist[[itr]] <- z
+    t_hist[[itr]] <- tb
+    k_hist[[itr]] <- kb
+    T_hist[[itr]] <- T_all
+    K_hist[[itr]] <- K_all
+  }
+  
+  # return the stored z, t, k
+  list(z=z_hist, t=t_hist, k=k_hist, T_all=T_hist, K_all=K_hist)
+}
+
+
+###* Load the data to test the performance (with 1500 iterations) *###
+data <- read.csv('final_data.csv')
+set.seed(123)
+
+y <- list(immuno=matrix(data[data$group=='immuno', 'logArea']), cryo=matrix(data[data$group=='cryo', 'logArea']))
+colnames(y[[1]]) <- 'x1'
+colnames(y[[2]]) <- 'x1'
+
+iter_max <- 1500
+result <- slice_sampler_HDP(y, iter_max=iter_max)
+
+
+###* Visualize the result in trace plot to test the convergence*###
+t_trace <- c()
+for (i in 2:(iter_max)) {
+  t_trace <- append(t_trace, result$t[[i]][[1]][1])
+}
+
+k_trace <- c()
+for (i in 2:(iter_max)) {
+  k_trace <- append(k_trace, result$k[[i]][[1]][1])
+}
+
+z_trace <- c()
+for (i in 2:(iter_max)) {
+  z_trace <- append(z_trace, result$z[[i]][[1]][1])
+}
+
+T_trace <- c()
+for (i in 2:(iter_max)) {
+  T_trace <- append(T_trace, result$T_all[[i]][[1]][1])
+}
+
+K_trace <- c()
+for (i in 2:(iter_max)) {
+  K_trace <- append(K_trace, result$K_all[[i]][[1]][1])
+}
+
+cluster_number <- c() 
+for (i in 2:iter_max) {
+  tmp <- unique(c(result$z[[i]][[1]], result$z[[i]][[2]]))
+  cluster_number <- append(cluster_number, length(tmp))
+}
+
+
+###* Samples of t_11, s_11 and z_11: *###
+par(mfrow=c(3,1))
+plot(1:(iter_max-1), t_trace, 'l', xlab='Iteration', ylab='t_11')
+plot(1:(iter_max-1), k_trace, 'l', xlab='Iteration', ylab='k_11')
+plot(1:(iter_max-1), z_trace, 'l', xlab='Iteration', ylab='z_11')
+
+###* Samples of T_11 and K_11 *###
+par(mfrow=c(2,1))
+plot(1:(iter_max-1), T_trace, 'l', xlab='Iteration', ylab='T_11')
+plot(1:(iter_max-1), K_trace, 'l', xlab='Iteration', ylab='K_11')
+
+
+###* Number of Clusters*###
+par(mfrow=c(1,1))
+plot(1:(iter_max-1), cluster_number, 'l', xlab='Iteration',
+     ylab='Number of Clusters')
+
+
+###* Boxplot for the sample distribution from last iteraction *###
+# sample distribution: last iteration
+data$index <- 0
+data[data$group == 'immuno', 'index'] <- result$z[[iter_max]][[1]]
+data[data$group == 'cryo', 'index'] <- result$z[[iter_max]][[2]]
+unique_index <- unique(data$index)
+
+group_data <- split(data$logArea, data$index)
+names(group_data) <- c(1:length(unique_index))
+group_data <- group_data[lengths(group_data) >= 8]
+boxplot(group_data,
+        xlab = "Cluster Index", ylab = "logArea",
+        main = "Boxplot by Cluster")
+
+
+###* Heat map of clusters *###
+all_i.1 <- sum(data$group == "immuno")
+all_i.2 <- sum(data$group == "cryo")
+all_i = dim(data)[1]
+simu_mat <- matrix(0, all_i, all_i)
+for (i in 2:iter_max) {
+  z <- c(result$z[[i]][[1]], result$z[[i]][[2]]) 
+  for (j in 1:all_i) {
+    for (k in 1:all_i){
+      simu_mat[j, k] = simu_mat[j, k] + (z[j] == z[k])
+    }
+  }
+}
+
+simu_mat <- simu_mat / iter_max
+heatmap(simu_mat, Rowv = NA, Colv = NA, main="original order")
+heatmap(simu_mat, main="altered order")
